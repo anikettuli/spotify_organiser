@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import shutil
+import threading
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -21,6 +22,11 @@ class CacheManager:
         self.tracks_cache_file = os.path.join(cache_dir, "tracks_metadata.json")
         self.classifications_cache_file = os.path.join(cache_dir, "classifications.json")
         self.fetch_sessions_file = os.path.join(cache_dir, "fetch_sessions.json")
+        
+        # Thread locks for cache safety
+        self._tracks_lock = threading.Lock()
+        self._classifications_lock = threading.Lock()
+        self._sessions_lock = threading.Lock()
         
         # Create cache directory if it doesn't exist
         os.makedirs(cache_dir, exist_ok=True)
@@ -87,23 +93,24 @@ class CacheManager:
     
     def save_tracks_batch(self, tracks: List[Dict]):
         """
-        Save multiple tracks to cache in batch.
+        Save multiple tracks to cache in batch (thread-safe).
         
         Args:
             tracks: List of track metadata dictionaries
         """
-        for track in tracks:
-            track_id = track.get('id')
-            if track_id:
-                self.tracks_cache[track_id] = {
-                    **track,
-                    'cached_at': datetime.now().isoformat()
-                }
-        self._save_cache(self.tracks_cache_file, self.tracks_cache)
+        with self._tracks_lock:
+            for track in tracks:
+                track_id = track.get('id')
+                if track_id:
+                    self.tracks_cache[track_id] = {
+                        **track,
+                        'cached_at': datetime.now().isoformat()
+                    }
+            self._save_cache(self.tracks_cache_file, self.tracks_cache)
     
     def get_classification(self, track_id: str) -> Optional[str]:
         """
-        Get cached classification for a track.
+        Get cached classification for a track (thread-safe read).
         
         Args:
             track_id: Spotify track ID
@@ -111,26 +118,28 @@ class CacheManager:
         Returns:
             Category name or None if not cached
         """
-        entry = self.classifications_cache.get(track_id)
-        if entry:
-            return entry.get('category')
-        return None
+        with self._classifications_lock:
+            entry = self.classifications_cache.get(track_id)
+            if entry:
+                return entry.get('category')
+            return None
     
     def save_classification(self, track_id: str, category: str, confidence: float = 1.0):
         """
-        Save track classification to cache.
+        Save track classification to cache (thread-safe write).
         
         Args:
             track_id: Spotify track ID
             category: Assigned category
             confidence: Classification confidence score
         """
-        self.classifications_cache[track_id] = {
-            'category': category,
-            'confidence': confidence,
-            'classified_at': datetime.now().isoformat()
-        }
-        self._save_cache(self.classifications_cache_file, self.classifications_cache)
+        with self._classifications_lock:
+            self.classifications_cache[track_id] = {
+                'category': category,
+                'confidence': confidence,
+                'classified_at': datetime.now().isoformat()
+            }
+            self._save_cache(self.classifications_cache_file, self.classifications_cache)
     
     def save_classifications_batch(self, classifications: Dict[str, tuple]):
         """

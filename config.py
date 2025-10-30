@@ -18,12 +18,13 @@ class Config:
     VLLM_ENDPOINT = os.getenv('VLLM_ENDPOINT', 'http://localhost:8000/v1')
     VLLM_MODEL = os.getenv('VLLM_MODEL', 'unsloth/gemma-3-1b-it')  # 1B for fastest inference
     
-    # Parallel processing (optimized for 1B model - maximum parallelization)
-    BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))  # Large batches with 1B model
-    MAX_WORKERS = int(os.getenv('MAX_WORKERS', '15'))  # Maximum parallel workers
+    # Parallel processing - 8 workers for vLLM
+    BATCH_SIZE = int(os.getenv('BATCH_SIZE', '8'))  # Process 8 tracks at once
+    MAX_WORKERS = int(os.getenv('MAX_WORKERS', '8'))  # 8 parallel threads
     
     # Classification settings
     CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.8'))
+    FETCH_ARTIST_GENRES = os.getenv('FETCH_ARTIST_GENRES', '1').lower() in ('1', 'true', 'yes')
     
     # Cache file for token
     TOKEN_CACHE_PATH = '.spotify_token_cache'

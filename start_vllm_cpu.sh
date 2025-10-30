@@ -19,8 +19,8 @@ if ! python3 -c "import vllm" &> /dev/null; then
 fi
 
 # Use the simpler vllm serve command with memory limit
-# --max-model-len 8192: Limit context to 8K tokens (fits in 8GB VRAM with quantized model)
+# --max-model-len 2048: Minimal context = max parallel throughput (16 workers)
 # --gpu-memory-utilization 0.8: Use 80% of GPU memory
 vllm serve "unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit" \
     --gpu-memory-utilization 0.8 \
-    --max-model-len 8192
+    --max-model-len 2048

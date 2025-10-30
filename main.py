@@ -28,36 +28,19 @@ def print_banner():
 
 
 def print_summary(categorized_tracks: dict, cache_stats: dict = None):
-    """Print enhanced classification summary with percentage breakdown."""
+    """Print classification summary."""
     table = Table(title="Classification Summary", show_header=True, header_style="bold magenta")
-    table.add_column("Category", style="cyan", width=22)
-    table.add_column("Tracks", justify="right", style="green", width=10)
-    table.add_column("Percentage", justify="right", style="yellow", width=12)
-    table.add_column("Top Artists", style="dim", width=40)
+    table.add_column("Category", style="cyan", width=20)
+    table.add_column("Tracks", justify="right", style="green")
     
     total = 0
     for category in Config.CATEGORIES:
         count = len(categorized_tracks.get(category, []))
+        table.add_row(category, str(count))
         total += count
     
-    for category in Config.CATEGORIES:
-        tracks = categorized_tracks.get(category, [])
-        count = len(tracks)
-        percentage = f"{(count/total*100):.1f}%" if total > 0 else "0%"
-        
-        # Get top 3 artists in this category
-        artist_counts = {}
-        for track in tracks:
-            for artist in track.get('artists', []):
-                artist_counts[artist] = artist_counts.get(artist, 0) + 1
-        
-        top_artists = sorted(artist_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-        top_artists_str = ", ".join([f"{a}" for a, c in top_artists]) if top_artists else "—"
-        
-        table.add_row(category, str(count), percentage, top_artists_str[:38])
-    
-    table.add_row("─" * 22, "─" * 10, "─" * 12, "─" * 40, style="dim")
-    table.add_row("TOTAL", str(total), "100%", "", style="bold")
+    table.add_row("─" * 20, "─" * 10, style="dim")
+    table.add_row("TOTAL", str(total), style="bold")
     
     console.print()
     console.print(table)
@@ -170,14 +153,25 @@ def main():
         if not tracks:
             if args.source == 'liked':
                 console.print("📥 Fetching liked songs from Spotify...", style="cyan")
-                with console.status("[bold cyan]Loading tracks from Spotify API..."):
+                with console.status("[bold cyan]⏳ Loading tracks from Spotify API..."):
                     tracks = spotify.get_liked_songs()
             else:
                 console.print(f"📥 Fetching playlist '{source_name}' from Spotify...", style="cyan")
-                with console.status("[bold cyan]Loading tracks from Spotify API..."):
+                with console.status("[bold cyan]⏳ Loading tracks from Spotify API..."):
                     tracks = spotify.get_playlist_tracks(args.playlist_id)
             
-            console.print(f"✅ Loaded {len(tracks)} tracks from {source_name}", style="green")
+            console.print(f"\n✅ Loaded {len(tracks)} tracks from {source_name}", style="green")
+            
+            # Show statistics
+            unique_artists = set()
+            for t in tracks:
+                unique_artists.update(t.get('artists', []))
+            
+            tracks_with_genres = sum(1 for t in tracks if t.get('genres'))
+            total_genres = sum(len(t.get('genres', [])) for t in tracks)
+            
+            console.print(f"   🎤 {len(unique_artists)} unique artists", style="dim")
+            console.print(f"   🎸 {tracks_with_genres}/{len(tracks)} tracks have genre data ({total_genres} total genres)", style="dim")
             
             # Save to cache
             console.print("💾 Saving tracks to cache...", style="dim")
@@ -215,16 +209,14 @@ def main():
             # Classify tracks with error handling and real-time output
             try:
                 console.print()
-                console.print("═" * 100, style="dim")
+                console.print("═" * 80, style="dim")
                 console.print("🎵 TRACK-BY-TRACK CLASSIFICATION", style="bold cyan")
-                console.print("[dim]Method: (artist)=Known Artist DB, (year)=Oldies Rule, (AI)=LLM Classification[/dim]")
-                console.print("═" * 100, style="dim")
+                console.print("═" * 80, style="dim")
                 
                 def track_update(track, category, processed, total):
-                    """Callback for each track completion with enhanced info."""
+                    """Callback for each track completion."""
                     artists = ", ".join(track.get('artists', ['Unknown']))
                     name = track.get('name', 'Unknown')
-                    year = track.get('release_date', '')[:4] if track.get('release_date') else '????'
                     
                     # Category color coding
                     category_colors = {
@@ -233,27 +225,22 @@ def main():
                     }
                     color = category_colors.get(category, 'white')
                     
-                    # Show classification method hint
-                    method_hint = ""
-                    if any(artist.lower() in ['arijit singh', 'shreya ghoshal', 'diljit dosanjh', 'sidhu moose wala', 'ap dhillon'] 
-                           for artist in track.get('artists', [])):
-                        method_hint = "[dim](artist)[/dim]"
-                    elif year and year != '????' and int(year) < 2000:
-                        method_hint = "[dim](year)[/dim]"
-                    else:
-                        method_hint = "[dim](AI)[/dim]"
-                    
-                    console.print(
-                        f"[{processed:4d}/{total}] "
-                        f"[{color}]●[/{color}] {category:18s} {method_hint:12s} | "
-                        f"[bold]{artists[:28]:<28s}[/bold] - {name[:35]:<35s} "
-                        f"[dim]({year})[/dim]"
-                    )
+                    console.print(f"[{processed:4d}/{total}] [{color}]{category:20s}[/{color}] | {artists[:30]:<30s} - {name[:40]:<40s}")
                 
                 categorized_tracks = classifier.classify_tracks(tracks, track_callback=track_update)
                 
                 console.print("═" * 80, style="dim")
                 console.print("✅ Classification complete!", style="bold green")
+                
+                # Show low confidence warnings
+                low_conf_tracks = [t for t in tracks if t.get('_low_confidence_guess')]
+                if low_conf_tracks:
+                    console.print(f"\n⚠️  {len(low_conf_tracks)} tracks had <80% confidence and were moved to 'Misc':", style="yellow")
+                    for t in low_conf_tracks[:5]:  # Show first 5
+                        guess = t.get('_low_confidence_guess', '')
+                        console.print(f"   • {t.get('name')} - {', '.join(t.get('artists', []))} (guessed: {guess})", style="dim")
+                    if len(low_conf_tracks) > 5:
+                        console.print(f"   ... and {len(low_conf_tracks) - 5} more", style="dim")
             
             except KeyboardInterrupt:
                 console.print("\n⚠️  Classification interrupted!", style="yellow")

@@ -22,14 +22,11 @@ class SpotifyClient:
     def __init__(self):
         """Initialize Spotify client with OAuth2."""
         self.sp = None
-        print(f"🔍 Debug: _HAS_SPOTIPY={_HAS_SPOTIPY}, USE_MOCKS={Config.USE_MOCKS}")
         # If spotipy is available and mocks are not requested, authenticate.
         if _HAS_SPOTIPY and not Config.USE_MOCKS:
-            print("🔐 Attempting Spotify authentication...")
             self._authenticate()
         else:
             # Keep self.sp as None to indicate mock mode
-            print(f"⚠️  Using mock mode (_HAS_SPOTIPY={_HAS_SPOTIPY}, USE_MOCKS={Config.USE_MOCKS})")
             self.sp = None
     
     def _authenticate(self):
@@ -46,10 +43,9 @@ class SpotifyClient:
             self.sp = spotipy.Spotify(auth_manager=auth_manager)
             # Test the connection by getting current user
             _ = self.sp.current_user()
-            print(f"✅ Successfully authenticated with Spotify!")
         except Exception as e:
             print(f"⚠️  Spotify authentication failed: {e}")
-            print(f"   Falling back to mock mode for development")
+            print("   Falling back to mock mode for development")
             self.sp = None
     
     def get_current_user(self) -> Dict:
@@ -63,7 +59,7 @@ class SpotifyClient:
     def get_liked_songs(self) -> List[Dict]:
         """
         Fetch all liked songs from user's library.
-        Handles pagination automatically.
+        Handles pagination automatically. Fetches artist genres efficiently in one pass.
         
         Returns:
             List of track objects with metadata
@@ -74,6 +70,8 @@ class SpotifyClient:
             offset = 0
             limit = 50
 
+            # First pass: fetch all tracks
+            print("📥 Fetching tracks...")
             while True:
                 results = self.sp.current_user_saved_tracks(limit=limit, offset=offset)
                 if not results['items']:
@@ -81,13 +79,89 @@ class SpotifyClient:
 
                 for item in results['items']:
                     track = item['track']
-                    tracks.append(self._extract_track_info(track))
+                    track_info = self._extract_track_info(track)
+                    tracks.append(track_info)
 
                 offset += limit
 
                 # Break if we've fetched all tracks
                 if len(results['items']) < limit:
                     break
+
+            # Second pass: collect all unique artist IDs (automatically deduplicates)
+            print(f"🎤 Found {len(tracks)} tracks, collecting unique artists...")
+            
+            # Check if we should fetch artist genres
+            from config import Config
+            if not Config.FETCH_ARTIST_GENRES:
+                print("⏭️  Skipping artist genre fetching (disabled in config)")
+                print("   Classification will rely on artist names and language detection")
+                for track in tracks:
+                    track['genres'] = []
+                return tracks
+            
+            all_artist_ids = set()  # Set automatically handles duplicates
+            total_artist_references = 0
+            for track in tracks:
+                total_artist_references += len(track['artist_ids'])
+                all_artist_ids.update(track['artist_ids'])
+            
+            unique_artist_ids = list(all_artist_ids)
+            duplicates_avoided = total_artist_references - len(unique_artist_ids)
+            print(f"🎵 {len(unique_artist_ids)} unique artists (avoided {duplicates_avoided} duplicate API calls)")
+            print(f"   Fetching genre data in batches of 50 (with 2s delays to avoid rate limits)...")
+            
+            # Third pass: fetch all artist genres in batches of 50
+            import time
+            artist_genres_map = {}
+            for i in range(0, len(unique_artist_ids), 50):
+                batch = unique_artist_ids[i:i+50]
+                try:
+                    artists_info = self.sp.artists(batch)
+                    for artist in artists_info.get('artists', []):
+                        if artist and artist.get('id'):
+                            artist_genres_map[artist['id']] = {
+                                'genres': artist.get('genres', []),
+                                'popularity': artist.get('popularity', 0)
+                            }
+                    print(f"   ✓ Processed {min(i+50, len(unique_artist_ids))}/{len(unique_artist_ids)} artists")
+                    
+                    # Add delay to avoid rate limits (Spotify is VERY strict)
+                    # Wait 2 seconds between batches to stay well under limits
+                    if i + 50 < len(unique_artist_ids):  # Don't sleep after last batch
+                        time.sleep(2.0)
+                        
+                except Exception as e:
+                    print(f"   ⚠ Error fetching artists {i}-{i+50}: {e}")
+                    # On rate limit, wait longer
+                    if "429" in str(e) or "rate" in str(e).lower():
+                        print(f"   ⏸️  Rate limited, waiting 30 seconds...")
+                        time.sleep(30)
+                    pass
+
+            # Fourth pass: enrich tracks with artist genres (mapping cached artist data)
+            print(f"✨ Mapping artist genres back to {len(tracks)} tracks...")
+            tracks_enriched = 0
+            total_genres_added = 0
+            
+            for track in tracks:
+                genres = []
+                # Look up each artist ID in the cached map (already fetched once)
+                for artist_id in track['artist_ids']:
+                    if artist_id in artist_genres_map:
+                        artist_genres = artist_genres_map[artist_id]['genres']
+                        genres.extend(artist_genres)
+                
+                # Store unique genres for this track
+                track['genres'] = list(set(genres))
+                if track['genres']:
+                    tracks_enriched += 1
+                    total_genres_added += len(track['genres'])
+            
+            print(f"   ✓ {tracks_enriched}/{len(tracks)} tracks now have genre data ({total_genres_added} total genre tags)")
+            if len(artist_genres_map) < len(unique_artist_ids):
+                missing = len(unique_artist_ids) - len(artist_genres_map)
+                print(f"   ⚠️  {missing} artists had no genre data available from Spotify")
 
             return tracks
 
