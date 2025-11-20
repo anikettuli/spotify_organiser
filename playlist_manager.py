@@ -24,8 +24,7 @@ class PlaylistManager:
         dry_run: bool = False
     ) -> Dict[str, str]:
         """
-        Create playlists for each category and add tracks.
-        Overwrites any existing playlists with the same name.
+        Create or update playlists for each category, merging non-duplicate tracks.
         
         Args:
             categorized_tracks: Dict mapping categories to track lists
@@ -49,7 +48,7 @@ class PlaylistManager:
             description = f"Auto-sorted {category} tracks from {source_name} on {timestamp}"
             
             if dry_run:
-                print(f"📋 [DRY RUN] Would create playlist '{playlist_name}' with {len(tracks)} tracks")
+                print(f"📋 [DRY RUN] Would create/update playlist '{playlist_name}' with {len(tracks)} tracks")
                 playlist_ids[category] = f"dry_run_{category}"
             else:
                 try:
@@ -57,28 +56,31 @@ class PlaylistManager:
                     if not self.spotify.sp:
                         return None
 
-                    # Check for and delete existing playlist with same name
+                    # Check for existing playlist
                     existing_id = self._find_playlist_by_name(playlist_name)
+                    
                     if existing_id:
-                        print(f"🗑️  Deleting existing playlist '{playlist_name}'")
-                        self.spotify.sp.current_user_unfollow_playlist(existing_id)
-                    
-                    # Create new playlist
-                    playlist_id = self.spotify.create_playlist(
-                        name=playlist_name,
-                        description=description,
-                        public=False  # Keep private by default
-                    )
-                    
-                    # Add tracks
-                    track_uris = [track['uri'] for track in tracks]
-                    self.spotify.add_tracks_to_playlist(playlist_id, track_uris)
-                    
-                    playlist_ids[category] = playlist_id
-                    print(f"✅ Created '{playlist_name}' with {len(tracks)} tracks")
+                        # Merge new tracks into existing playlist
+                        added_count = self._merge_tracks_into_playlist(existing_id, tracks)
+                        playlist_ids[category] = existing_id
+                        print(f"✅ Updated '{playlist_name}' - added {added_count} new tracks (total: {len(tracks)})")
+                    else:
+                        # Create new playlist
+                        playlist_id = self.spotify.create_playlist(
+                            name=playlist_name,
+                            description=description,
+                            public=False  # Keep private by default
+                        )
+                        
+                        # Add tracks
+                        track_uris = [track['uri'] for track in tracks]
+                        self.spotify.add_tracks_to_playlist(playlist_id, track_uris)
+                        
+                        playlist_ids[category] = playlist_id
+                        print(f"✅ Created '{playlist_name}' with {len(tracks)} tracks")
                     
                 except Exception as e:
-                    print(f"❌ Error creating playlist for {category}: {e}")
+                    print(f"❌ Error creating/updating playlist for {category}: {e}")
         
         return playlist_ids
     
@@ -116,6 +118,56 @@ class PlaylistManager:
         except Exception as e:
             print(f"⚠️  Error searching for playlist: {e}")
             return None
+    
+    def _merge_tracks_into_playlist(self, playlist_id: str, new_tracks: List[Dict]) -> int:
+        """
+        Merge new tracks into existing playlist, avoiding duplicates.
+        
+        Args:
+            playlist_id: Target playlist ID
+            new_tracks: List of tracks to potentially add
+            
+        Returns:
+            Number of tracks actually added
+        """
+        if not self.spotify.sp:
+            return 0
+        
+        try:
+            # Get existing track URIs from playlist
+            existing_uris = set()
+            offset = 0
+            limit = 100
+            
+            while True:
+                results = self.spotify.sp.playlist_tracks(
+                    playlist_id,
+                    fields='items.track.uri,next',
+                    limit=limit,
+                    offset=offset
+                )
+                
+                for item in results['items']:
+                    if item.get('track') and item['track'].get('uri'):
+                        existing_uris.add(item['track']['uri'])
+                
+                if not results.get('next'):
+                    break
+                
+                offset += limit
+            
+            # Filter out duplicates
+            new_uris = [track['uri'] for track in new_tracks if track['uri'] not in existing_uris]
+            
+            if new_uris:
+                # Add non-duplicate tracks
+                self.spotify.add_tracks_to_playlist(playlist_id, new_uris)
+            
+            return len(new_uris)
+            
+        except Exception as e:
+            print(f"⚠️  Error merging tracks: {e}")
+            return 0
     
     def update_existing_playlist(
         self,

@@ -224,4 +224,19 @@ class CacheManager:
         self._save_cache(self.tracks_cache_file, self.tracks_cache)
         self._save_cache(self.classifications_cache_file, self.classifications_cache)
         self._save_cache(self.fetch_sessions_file, self.fetch_sessions)
+    
+    def clear_tracks_cache(self):
+        """Clear only track metadata (for rare re-fetching from Spotify)."""
+        with self._tracks_lock:
+            self.tracks_cache = {}
+            self._save_cache(self.tracks_cache_file, self.tracks_cache)
+        with self._sessions_lock:
+            self.fetch_sessions = {}
+            self._save_cache(self.fetch_sessions_file, self.fetch_sessions)
+    
+    def clear_classifications_cache(self):
+        """Clear only classifications (for re-classifying with same track data)."""
+        with self._classifications_lock:
+            self.classifications_cache = {}
+            self._save_cache(self.classifications_cache_file, self.classifications_cache)
 

@@ -14,29 +14,39 @@ class Config:
     SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET', '')
     SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:8888/callback')
     
-    # LLM configuration (vLLM - gemma-3-1b-it for maximum speed)
-    VLLM_ENDPOINT = os.getenv('VLLM_ENDPOINT', 'http://localhost:8000/v1')
-    VLLM_MODEL = os.getenv('VLLM_MODEL', 'unsloth/gemma-3-1b-it')  # 1B for fastest inference
+    # Gemini API configuration
+    # Using Gemini 3.0 Pro Experimental as requested
+    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.0-pro-exp')
+    GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
     
-    # Parallel processing - 8 workers for vLLM
-    BATCH_SIZE = int(os.getenv('BATCH_SIZE', '8'))  # Process 8 tracks at once
-    MAX_WORKERS = int(os.getenv('MAX_WORKERS', '8'))  # 8 parallel threads
+    # Batch processing (100 songs per Gemini request)
+    BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
     
     # Classification settings
     CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.8'))
-    FETCH_ARTIST_GENRES = os.getenv('FETCH_ARTIST_GENRES', '1').lower() in ('1', 'true', 'yes')
+    FETCH_ARTIST_GENRES = os.getenv('FETCH_ARTIST_GENRES', '0').lower() in ('1', 'true', 'yes')
     
     # Cache file for token
     TOKEN_CACHE_PATH = '.spotify_token_cache'
     
-    # Categories
+    # Categories (14 total - language/genre primary + mood/vibe secondary)
     CATEGORIES = [
-        'English',
-        'Hindi',
-        'Punjabi',
-        'Phonk/Instrumental',
+        # Language & Core Genre (9 categories)
+        'Punjabi - Hype/Fun',
+        'Hindi - Party/Dance',
+        'Hindi - Bollywood/Melodic',
+        'English - Pop',
+        'English - Hip-Hop',
+        'English - R&B',
+        'English - Rock/Alt',
         'Oldies',
-        'Misc'
+        'World',
+        # Mood & Vibe (5 categories)
+        'Sad/Emotional',
+        'Gym - Phonk',
+        'Gym - Hype',
+        'Chill/Lofi',
+        'Soundtracks'
     ]
 
     # When enabled the app will use local mocks/fallbacks so the app can run

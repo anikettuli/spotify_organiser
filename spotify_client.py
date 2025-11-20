@@ -6,13 +6,14 @@ enabled. The real code path is unchanged when Spotipy is installed and
 mocking is disabled.
 """
 from typing import List, Dict, Optional
+import time
 from config import Config
 
 _HAS_SPOTIPY = True
 try:
     import spotipy
     from spotipy.oauth2 import SpotifyOAuth
-except Exception:
+except ImportError:
     _HAS_SPOTIPY = False
 
 
@@ -92,7 +93,6 @@ class SpotifyClient:
             print(f"🎤 Found {len(tracks)} tracks, collecting unique artists...")
             
             # Check if we should fetch artist genres
-            from config import Config
             if not Config.FETCH_ARTIST_GENRES:
                 print("⏭️  Skipping artist genre fetching (disabled in config)")
                 print("   Classification will rely on artist names and language detection")

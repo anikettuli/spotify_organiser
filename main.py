@@ -3,13 +3,13 @@
 import argparse
 import sys
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.panel import Panel
 from spotify_client import SpotifyClient
-from classifier import SongClassifier
+from llm_classifier import LLMClassifier
 from playlist_manager import PlaylistManager
 from cache_manager import CacheManager
+from review_manager import ReviewManager
 from config import Config
 
 
@@ -57,28 +57,72 @@ def main():
     parser = argparse.ArgumentParser(
         description="Organize Spotify songs into categorized playlists using AI"
     )
+    # Workflow commands (mutually exclusive)
+    workflow = parser.add_mutually_exclusive_group()
+    workflow.add_argument(
+        '--fetch',
+        action='store_true',
+        help='Step 1: Fetch tracks from Spotify (rarely needed)'
+    )
+    workflow.add_argument(
+        '--classify',
+        action='store_true',
+        help='Step 2: Classify tracks with AI (run often to reclassify)'
+    )
+    workflow.add_argument(
+        '--apply',
+        action='store_true',
+        help='Step 3: Apply classifications and create/update playlists'
+    )
+    
     parser.add_argument(
         '--source',
         choices=['liked', 'playlist'],
-        required=True,
-        help='Source of tracks (liked songs or specific playlist)'
+        default='liked',
+        help='Source of tracks (default: liked)'
     )
     parser.add_argument(
         '--playlist-id',
         help='Playlist ID (required if source is playlist)'
     )
     parser.add_argument(
+        '--clear-tracks',
+        action='store_true',
+        help='Clear cached tracks (for --fetch)'
+    )
+    parser.add_argument(
+        '--clear-classifications',
+        action='store_true',
+        help='Clear cached classifications (for --classify)'
+    )
+    
+    # Legacy support
+    parser.add_argument(
         '--dry-run',
         action='store_true',
-        help='Preview classification without creating playlists'
+        help='Legacy: Run all steps but preview only (same as --classify)'
     )
     parser.add_argument(
         '--clear-cache',
         action='store_true',
-        help='Clear all cached data before running'
+        help='Legacy: Clear all cached data'
     )
     
     args = parser.parse_args()
+    
+    # Determine workflow mode
+    if args.fetch or args.classify or args.apply:
+        # New workflow mode
+        if args.fetch:
+            mode = 'fetch'
+        elif args.classify:
+            mode = 'classify'
+        else:
+            mode = 'apply'
+    elif args.dry_run:
+        mode = 'classify'  # Legacy: dry-run is now classify
+    else:
+        mode = 'all'  # Legacy: run everything
     
     # Validate arguments
     if args.source == 'playlist' and not args.playlist_id:
@@ -86,6 +130,15 @@ def main():
         sys.exit(1)
     
     print_banner()
+    
+    # Show workflow mode
+    if mode != 'all':
+        mode_labels = {
+            'fetch': '1️⃣  STEP 1: FETCH TRACKS FROM SPOTIFY',
+            'classify': '2️⃣  STEP 2: CLASSIFY TRACKS WITH AI',
+            'apply': '3️⃣  STEP 3: APPLY TO PLAYLISTS'
+        }
+        console.print(f"\n[bold cyan]{mode_labels[mode]}[/bold cyan]\n")
     
     try:
         # --- STEP 1: CONFIGURATION & CACHE ---
@@ -98,10 +151,54 @@ def main():
         # Initialize cache manager
         cache_manager = CacheManager()
         
+        # Handle cache clearing flags
         if args.clear_cache:
-            console.print("🗑️  Clearing cache...", style="yellow")
+            console.print("🗑️  Clearing all cache...", style="yellow")
             cache_manager.clear_cache()
             console.print("✅ Cache cleared")
+        elif args.clear_tracks:
+            console.print("🗑️  Clearing track cache only...", style="yellow")
+            cache_manager.clear_tracks_cache()
+            console.print("✅ Track cache cleared")
+        elif args.clear_classifications:
+            console.print("🗑️  Clearing classification cache only...", style="yellow")
+            cache_manager.clear_classifications_cache()
+            console.print("✅ Classification cache cleared")
+        
+        # --- WORKFLOW BRANCHING ---
+        if mode == 'apply':
+            # STEP 3: Apply from review file
+            console.print("\n[bold]Loading review file...[/bold]")
+            
+            if not ReviewManager.is_approved():
+                console.print("\n❌ [bold red]Review file not approved![/bold red]")
+                console.print("\n📝 To approve classifications:")
+                console.print("   1. Review: cat .review/classification_review.json")
+                console.print("   2. Edit 'approved' field to true")
+                console.print("   3. Run again: python main.py --apply\n")
+                sys.exit(1)
+            
+            review_data = ReviewManager.load_review()
+            console.print(f"✅ Loaded approved review from {review_data['timestamp'][:10]}")
+            console.print(f"   📊 {review_data['total_tracks']} tracks in {len(review_data['categories'])} categories")
+            
+            # Reconstruct categorized_tracks from review
+            categorized_tracks = {}
+            for category, data in review_data['categories'].items():
+                categorized_tracks[category] = data['tracks']
+            
+            # Initialize Spotify for playlist operations
+            spotify = SpotifyClient()
+            user = spotify.get_current_user()
+            console.print(f"✅ Logged in as: {user['display_name']}", style="green")
+            
+            # Create/update playlists
+            console.print(Panel("[bold cyan]CREATING/UPDATING PLAYLISTS[/bold cyan]"))
+            playlist_manager = PlaylistManager(spotify)
+            playlist_manager.create_categorized_playlists(categorized_tracks, review_data['source'])
+            
+            console.print("\n✅ [bold green]Playlists applied successfully![/bold green]")
+            sys.exit(0)
         
         # --- STEP 2: SPOTIFY AUTHENTICATION ---
         console.print(Panel("[bold cyan]STEP 2/5: SPOTIFY AUTHENTICATION[/bold cyan]"))
@@ -180,6 +277,12 @@ def main():
             cache_manager.save_fetch_session(args.source, source_id, track_ids)
             console.print("✅ All Spotify data safely cached", style="green")
         
+        # Exit after fetch if in fetch-only mode
+        if mode == 'fetch':
+            console.print("\n✅ [bold green]Tracks fetched and cached![/bold green]")
+            console.print(f"\n📝 Next step: python main.py --source {args.source} --classify")
+            sys.exit(0)
+        
         # --- STEP 4: CLASSIFY TRACKS ---
         console.print(Panel("[bold cyan]STEP 4/5: CLASSIFY TRACKS[/bold cyan]"))
         
@@ -204,7 +307,7 @@ def main():
             console.print(f"🤖 Classifying {len(unclassified_ids)} new tracks with AI...", style="cyan")
             
             # Initialize classifier
-            classifier = SongClassifier()
+            classifier = LLMClassifier()
             
             # Classify tracks with error handling and real-time output
             try:
@@ -250,6 +353,29 @@ def main():
                 console.print(f"\n❌ Classification error: {e}", style="red")
                 console.print("💾 Partial progress saved. Run again to resume.", style="green")
                 raise
+        
+        # Exit after classification if in classify mode
+        if mode == 'classify':
+            console.print("\n[bold]Saving classifications for review...[/bold]")
+            review_file = ReviewManager.save_for_review(categorized_tracks, source_name)
+            
+            # Show summary
+            console.print(f"\n✅ [bold green]Classifications saved to review file![/bold green]")
+            console.print(f"   📁 Location: {review_file}")
+            console.print(f"   📊 {len(tracks)} tracks in {len(categorized_tracks)} categories")
+            
+            # Show category breakdown
+            console.print("\n📋 [bold]Category Breakdown:[/bold]")
+            for category in sorted(categorized_tracks.keys(), key=lambda k: len(categorized_tracks[k]), reverse=True):
+                count = len(categorized_tracks[category])
+                pct = (count / len(tracks)) * 100
+                console.print(f"   {category:30s}: {count:4d} tracks ({pct:5.1f}%)")
+            
+            console.print("\n📝 [bold]Next steps:[/bold]")
+            console.print("   1. Review: cat .review/classification_review.json")
+            console.print("   2. Edit 'approved' field to true when satisfied")
+            console.print(f"   3. Apply: python main.py --source {args.source} --apply\n")
+            sys.exit(0)
         
         # --- STEP 5: SUMMARY & PLAYLISTS ---
         console.print(Panel("[bold cyan]STEP 5/5: SUMMARY & PLAYLISTS[/bold cyan]"))
