@@ -5,6 +5,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from config import Config
+from rule_classifier import RuleClassifier
 
 genai: Any
 
@@ -20,8 +21,9 @@ class LLMClassifier:
     """Music classifier using Gemini 2.0 Flash with comprehensive genre and mood detection."""
 
     def __init__(self):
-        """Initialize Gemini API."""
+        """Initialize Gemini API and rule-based classifier."""
         self.gemini_model: Optional[Any] = None
+        self.rule_classifier = RuleClassifier()
         
         if _HAS_GOOGLE and not Config.USE_MOCKS:
             try:
@@ -102,23 +104,56 @@ class LLMClassifier:
         return categorized_tracks
 
     def classify_batch(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
-        """Classify multiple songs with parallel API calls (optimized for 3-Pro limits)."""
-        if not self.gemini_model or not tracks:
-            return [self._fallback_classify(track) for track in tracks]
+        """
+        Classify multiple songs using hybrid approach:
+        1. Try rule-based classification first (fast, deterministic)
+        2. Use LLM for ambiguous cases only
+        """
+        if not tracks:
+            return []
+        
+        # Phase 1: Rule-based pre-classification
+        print(f"🎯 Running rule-based pre-classification on {len(tracks)} tracks...")
+        rule_classified = []
+        llm_needed = []
+        llm_needed_indices = []
+        
+        for i, track in enumerate(tracks):
+            rule_result = self.rule_classifier.classify(track)
+            if rule_result:
+                rule_classified.append((i, rule_result))
+            else:
+                llm_needed.append(track)
+                llm_needed_indices.append(i)
+        
+        print(f"   ✅ {len(rule_classified)} tracks classified by rules ({len(rule_classified)/len(tracks)*100:.1f}%)")
+        print(f"   🤖 {len(llm_needed)} tracks need LLM classification ({len(llm_needed)/len(tracks)*100:.1f}%)")
+        
+        # Initialize results array
+        results: List[Tuple[str, float]] = [('World', 0.5)] * len(tracks)
+        
+        # Fill in rule-based results
+        for idx, result in rule_classified:
+            results[idx] = result
+        
+        # Phase 2: LLM classification for remaining tracks
+        if not llm_needed or not self.gemini_model:
+            # Use fallback for LLM-needed tracks if no model
+            if llm_needed and not self.gemini_model:
+                for idx in llm_needed_indices:
+                    results[idx] = self._fallback_classify(tracks[idx])
+            return results
         
         try:
-            # Gemini 3 Pro Preview Limits:
-            # RPM: 2,000
-            # Output Tokens: 65k
-            # We can be aggressive.
+            # Process only LLM-needed tracks
             batch_size = Config.BATCH_SIZE
-            chunks = [tracks[i:i + batch_size] for i in range(0, len(tracks), batch_size)]
+            chunks = [llm_needed[i:i + batch_size] for i in range(0, len(llm_needed), batch_size)]
             
-            results: List[Optional[List[Tuple[str, float]]]] = [None] * len(chunks)
+            llm_results: List[Optional[List[Tuple[str, float]]]] = [None] * len(chunks)
 
             # Number of parallel Gemini requests (configurable via Config.PARALLEL_WORKERS)
             parallel_workers = Config.PARALLEL_WORKERS
-            print(f"🔄 Processing {len(tracks)} tracks in {len(chunks)} batches ({parallel_workers} parallel calls)...")
+            print(f"🔄 Processing {len(llm_needed)} LLM-needed tracks in {len(chunks)} batches ({parallel_workers} parallel calls)...")
             
             with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
                 for i in range(0, len(chunks), parallel_workers):
@@ -135,27 +170,41 @@ class LLMClassifier:
                     for future in futures:
                         idx = futures[future]
                         try:
-                            results[idx] = future.result()
+                            llm_results[idx] = future.result()
                         except Exception as e:
                             print(f"   ⚠️ Batch {idx+1} failed: {e}")
-                            results[idx] = [self._fallback_classify(t) for t in chunks[idx]]
+                            llm_results[idx] = [self._fallback_classify(t) for t in chunks[idx]]
                     
                     # Minimal wait (1s) just to be polite, even with high limits
                     if group_end < len(chunks):
                         time.sleep(1)
             
-            # Flatten results
-            final_results = []
-            for r in results:
+            # Merge LLM results back into main results array
+            llm_flat_results = []
+            for r in llm_results:
                 if r:
-                    final_results.extend(r)
-                else:
-                    pass
+                    llm_flat_results.extend(r)
+            
+            # Apply confidence boosting (rules + LLM agreement)
+            for i, llm_result in enumerate(llm_flat_results):
+                original_idx = llm_needed_indices[i]
+                track = llm_needed[i]
+                category, confidence = llm_result
+                
+                # Boost confidence if rules agree
+                boosted_category, boosted_confidence = self.rule_classifier.get_confidence_boost(
+                    track, category, confidence
+                )
+                results[original_idx] = (boosted_category, boosted_confidence)
                     
-            return final_results
+            return results
         except Exception as e:
-            print(f"\n⚠️  Classification failed: {e}")
-            return [self._fallback_classify(track) for track in tracks]
+            print(f"\n⚠️  LLM Classification failed: {e}")
+            # Fill remaining LLM-needed indices with fallback
+            for idx in llm_needed_indices:
+                if results[idx] == ('World', 0.5):  # Not yet classified
+                    results[idx] = self._fallback_classify(tracks[idx])
+            return results
     
     def _classify_batch_internal(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
         """Internal batch classification with retry logic."""
@@ -244,72 +293,106 @@ class LLMClassifier:
                               f"Info: {popularity}% pop, {explicit}, {duration_min}\n   "
                               f"Genres: {genres}")
         
-        return f"""You are an expert music classifier. Analyze each song carefully and classify into ONE category.
+        return f"""You are an expert music classifier analyzing songs that couldn't be confidently classified by rule-based systems. These are AMBIGUOUS cases requiring your expertise.
+
+**YOUR TASK:** Classify each song into ONE of 14 categories based on language, genre, artist, and mood.
 
 **METADATA GUIDE:**
-- **Popularity (0-100)**: >80 is Mainstream/Top 40. <30 is Niche/Indie.
-- **Explicit**: Contains curse words (often Hip-Hop/Rap).
-- **Duration**: <2m (Interlude/Viral), >6m (Prog/Classical).
-- **Genres**: Artist genres from Spotify (primary classification signal).
+- **Genres**: Spotify artist genres (most reliable signal - USE THIS FIRST)
+- **Artist Name**: Strong indicator of language/region (e.g., non-English names often indicate regional music)
+- **Popularity**: >80 = Mainstream, <30 = Niche/Underground
+- **Explicit**: Often indicates Hip-Hop/Rap
+- **Title Keywords**: Look for language-specific words or mood indicators
 
-**14 CATEGORIES:**
+**14 CATEGORIES WITH EXAMPLES:**
 
-**LANGUAGE-BASED (Check artist/title first):**
-1. "Punjabi - Hype/Fun" - Punjabi language songs. Artists: Sidhu Moose Wala, Karan Aujla, AP Dhillon, Shubh, Diljit Dosanjh, Ammy Virk, Jassa Dhillon, Arjan Dhillon, Navaan Sandhu, Tegi Pannu, Khan Bhaini, Sultaan.
+**LANGUAGE-BASED CATEGORIES (Primary):**
+1. **"Punjabi - Hype/Fun"** - Punjabi language, upbeat/party vibe
+   - Genres: punjabi, bhangra, desi hip hop
+   - Example: "295" by Sidhu Moose Wala, "Excuses" by AP Dhillon
 
-2. "Hindi - Party/Dance" - High-energy Hindi club/party tracks. Artists: Badshah, Yo Yo Honey Singh, Divine, KR$NA, Raftaar, Seedhe Maut. Songs like "Chammak Challo", "Kajra Re", "Hookah Bar".
+2. **"Hindi - Party/Dance"** - Hindi club bangers, high energy
+   - Genres: bollywood + (dance/edm/hip hop)
+   - Example: "Kala Chashma", "Nashe Si Chadh Gayi"
 
-3. "Hindi - Bollywood/Melodic" - Hindi film songs, indie, romantic ballads. Artists: Arijit Singh, Pritam, A.R. Rahman, Mohit Chauhan, Atif Aslam, Vishal-Shekhar, Shankar-Ehsaan-Loy, Salim-Sulaiman, Amit Trivedi.
+3. **"Hindi - Bollywood/Melodic"** - Hindi romantic/melodic songs
+   - Genres: filmi, bollywood, indian indie
+   - Example: "Tum Hi Ho" by Arijit Singh, "Agar Tum Saath Ho"
 
-4. "English - Pop" - English pop/dance/EDM. Artists: The Weeknd (most songs), Dua Lipa, Lady Gaga, Harry Styles, Taylor Swift, Ariana Grande, Post Malone, Doja Cat, Calvin Harris, David Guetta.
+4. **"English - Pop"** - English mainstream pop/dance
+   - Genres: pop, dance pop, electropop, edm
+   - Example: "Blinding Lights", "Levitating", "Anti-Hero"
 
-5. "English - Hip-Hop" - English rap/trap (moderate energy). Artists: Drake, Eminem, Kanye West, Travis Scott, J. Cole, Future, 21 Savage, Kendrick Lamar, Jack Harlow, Lil Baby, Don Toliver.
+5. **"English - Hip-Hop"** - English rap/trap (not aggressive gym music)
+   - Genres: hip hop, trap, rap
+   - Example: "God's Plan", "SICKO MODE", "The Box"
 
-6. "English - R&B" - Smooth R&B/soul. Artists: The Weeknd (R&B tracks), Frank Ocean, SZA, ZAYN, Khalid, 6LACK, Brent Faiyaz, Beyoncé (slow tracks).
+6. **"English - R&B"** - Smooth R&B/soul, slower tempo
+   - Genres: r&b, soul, neo soul
+   - Example: "Earned It", "Location", "Best Part"
 
-7. "English - Rock/Alt" - Rock/alternative/indie. Artists: Arctic Monkeys, Linkin Park, Imagine Dragons, Coldplay, Nirvana, Foo Fighters, The Neighbourhood, Radiohead, Green Day.
+7. **"English - Rock/Alt"** - Rock/alternative/indie rock
+   - Genres: rock, alternative, indie, metal
+   - Example: "Do I Wanna Know?", "In the End", "Radioactive"
 
-8. "Oldies" - ONLY Hindi classics pre-1990s. Artists: Kishore Kumar, Lata Mangeshkar, Mohammed Rafi, Mukesh, Nusrat Fateh Ali Khan. NO English oldies.
+8. **"Oldies"** - Hindi/Urdu classics ONLY from pre-1990
+   - Must be from golden era (Kishore Kumar, Lata, Rafi)
+   - Example: "Mere Sapno Ki Rani", "Kabhi Kabhie"
 
-9. "World" - Songs in OTHER languages (French, Spanish, Russian, Arabic, Turkish, K-pop, etc.). Artists: Indila, MORGENSHTERN, Bad Bunny, BLACKPINK.
+9. **"World"** - Non-English/Hindi/Punjabi languages
+   - Genres: french pop, k-pop, latin, reggaeton, afrobeat, arabic, turkish
+   - Example: "Dernière Danse" (French), "Dynamite" (K-pop), "Despacito" (Spanish)
 
-**MOOD OVERRIDES (Check vibe/energy):**
-10. "Sad/Emotional" - Sad/breakup songs ANY language. Keywords: heartbreak, lonely, tears, lost love, emotional. Artists: Harnoor, Billie Eilish, XXXTENTACION, Juice WRLD, sad Arijit Singh tracks.
+**MOOD OVERRIDES (Higher Priority):**
+10. **"Sad/Emotional"** - Heartbreak songs ANY language, melancholic mood
+    - Keywords: sad, heartbreak, miss, lonely, tears, pain
+    - Example: "Someone You Loved", "Chal Tere Ishq Mein", "Lucid Dreams"
 
-11. "Gym - Phonk" - Dark aggressive phonk ONLY. Artists: Kordhell, DVRST, KSLV Noh, Dxrk ダーク, MoonDeity, ONIMXRU. Keywords: "phonk", "drift", aggressive cowbell.
+11. **"Gym - Phonk"** - Dark phonk with cowbell/drift vibes
+    - Genres: phonk, brazilian phonk
+    - Example: "Murder in My Mind", "DVRST - Close Eyes"
 
-12. "Gym - Hype" - Aggressive workout English rap/trap. Artists: NLE Choppa, Pop Smoke, CJ, NEFFEX, Lil Pump. Must have aggressive energy.
+12. **"Gym - Hype"** - Aggressive workout rap (NOT regular hip-hop)
+    - Must have intense energy for workouts
+    - Example: "Walk Em Down", "Godzilla", "NEFFEX"
 
-13. "Chill/Lofi" - Lofi/ambient/study beats. Keywords: "lofi", "chill", "ambient", "slowed + reverb" (soft). Artists: Lofi Fruits Music, instrumental chill tracks.
+13. **"Chill/Lofi"** - Calm instrumental/lofi/study music
+    - Genres: lofi, chillhop, ambient
+    - Example: "3 A.M. Study Session", instrumental chill beats
 
-14. "Soundtracks" - Epic movie/game scores ONLY. Artists: Hans Zimmer, Ludwig Göransson, Michael Giacchino, Anirudh Ravichander (BGM), Ravi Basrur.
+14. **"Soundtracks"** - Epic cinematic/orchestral scores
+    - Genres: soundtrack, score, orchestral
+    - Example: "Time" (Hans Zimmer), "No Time for Caution"
 
-**CLASSIFICATION PRIORITY:**
-1. Check if SAD → "Sad/Emotional" (override language)
-2. Check if PHONK/GYM → "Gym - Phonk" or "Gym - Hype"
-3. Check LANGUAGE → Punjabi/Hindi/English categories
-4. Check if CHILL/LOFI → "Chill/Lofi"
-5. Check if SOUNDTRACK → "Soundtracks"
-6. Default foreign language → "World"
+**CLASSIFICATION DECISION TREE:**
+1. **Check GENRES first** (most reliable): If genre contains "punjabi/bhangra" → Punjabi. "bollywood/filmi" → Hindi. "k-pop/french/latin" → World. "phonk" → Gym-Phonk. "lofi" → Chill/Lofi.
+2. **Check MOOD keywords** in title: "sad/heartbreak/lonely/tears" → Sad/Emotional (overrides language).
+3. **Check ARTIST NAME** for language clues: Indian/South Asian names usually → Hindi/Punjabi. Korean names → World (K-pop).
+4. **Check TITLE LANGUAGE**: If Punjabi words (da, di, jatt, yaari) → Punjabi. Hindi words (hai, mera, tera, dil) → Hindi.
+5. **Default to genre-based**: Hip-hop/rap → English Hip-Hop. Pop → English Pop. Rock → English Rock/Alt.
 
 **CRITICAL RULES:**
-- Artist name = PRIMARY indicator (Karan Aujla = always Punjabi, Badshah = Hindi Party)
-- "World" is ONLY for non-English/Hindi/Punjabi languages
-- Sad songs override language categories
-- English songs before 2000 still go to English-Pop/Rock (NOT Oldies)
-- Soundtracks are ONLY epic/orchestral (NOT chill instrumentals)
+✅ **"World"** is ONLY for non-English/non-Hindi/non-Punjabi languages (French, Spanish, Korean, Arabic, etc.)
+✅ **Sad mood OVERRIDES language** (sad Punjabi song → Sad/Emotional, NOT Punjabi)
+✅ **"Gym - Hype"** needs AGGRESSIVE energy (NOT regular hip-hop)
+✅ **"Oldies"** is ONLY Hindi pre-1990 (NO English oldies)
+✅ **Use genres as primary signal** when available
 
 **Songs to classify:**
 {chr(10).join(songs_text)}
 
-**Instructions:**
-1. Analyze artist origin, language, genre, mood, and energy level
-2. Prioritize mood categories (Sad, Gym, Chill, Soundtracks) if applicable
-3. Return JSON array: [{{"index": 0, "category": "Punjabi - Hype/Fun", "confidence": 0.95}}, ...]
-4. Be decisive - use high confidence (0.85-0.95) for clear classifications
-5. Think carefully about cross-cultural collabs and mood overrides
+**OUTPUT FORMAT:**
+Return ONLY a JSON array with this exact structure:
+[{{"index": 0, "category": "Punjabi - Hype/Fun", "confidence": 0.90}}, {{"index": 1, "category": "English - Pop", "confidence": 0.85}}, ...]
 
-Return ONLY the JSON array, no other text."""
+**Confidence guidelines:**
+- 0.95: Genre tag perfectly matches category
+- 0.90: Artist is well-known for this category
+- 0.85: Multiple signals point to same category
+- 0.75: Reasonable inference from available data
+- 0.65: Uncertain, best guess
+
+Be decisive. Avoid "World" unless the song is clearly in a non-English/Hindi/Punjabi language."""
 
     def _parse_batch_response(self, response_text: str, tracks: List[Dict]) -> List[Tuple[str, float]]:
         """Parse Gemini JSON response into list of (category, confidence) tuples."""
