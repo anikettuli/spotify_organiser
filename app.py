@@ -305,6 +305,10 @@ def step_1_fetch():
         st.rerun()
 
 
+import pandas as pd
+
+# ...existing code...
+
 def step_2_classify():
     """Step 2: Classify tracks with AI."""
     st.markdown("## Step 2: Classify with AI")
@@ -413,8 +417,8 @@ def step_2_classify():
         st.markdown("---")
         st.markdown("### 📋 Classification Results")
         
-        # Load all classifications
-        categorized = {}
+        # Prepare data for editor
+        editor_data = []
         for track in tracks:
             track_id = track['id']
             cached_class = cache_manager.get_classification(track_id)
@@ -426,65 +430,105 @@ def step_2_classify():
                 category = "Unclassified"
                 confidence = 0.0
             
-            track['classification_category'] = category
-            track['classification_confidence'] = confidence
-            
-            if category not in categorized:
-                categorized[category] = []
-            categorized[category].append(track)
+            editor_data.append({
+                "ID": track_id,
+                "Track": track['name'],
+                "Artist": ", ".join(track['artists']),
+                "Category": category,
+                "Confidence": f"{confidence:.0%}"
+            })
         
-        st.session_state.categorized_tracks = categorized
+        df = pd.DataFrame(editor_data)
         
         # Summary stats
         cols = st.columns(4)
         cols[0].metric("Total Tracks", len(tracks))
-        cols[1].metric("Categories", len(categorized))
-        cols[2].metric("Classified", sum(len(v) for k, v in categorized.items() if k != "Unclassified"))
-        cols[3].metric("Avg Confidence", f"{sum(t.get('classification_confidence', 0) for t in tracks) / len(tracks):.0%}")
+        cols[1].metric("Categories", df['Category'].nunique())
+        cols[2].metric("Classified", len(df[df['Category'] != "Unclassified"]))
         
-        # Category breakdown with editable classifications
+        # Data Editor for bulk changes
         st.markdown("#### Edit Classifications")
+        st.caption("Double click on 'Category' to change it. Changes are saved automatically.")
         
-        for category in sorted(categorized.keys(), key=lambda k: len(categorized[k]), reverse=True):
-            tracks_in_cat = categorized[category]
+        edited_df = st.data_editor(
+            df,
+            column_config={
+                "ID": None, # Hide ID
+                "Category": st.column_config.SelectboxColumn(
+                    "Category",
+                    help="The category of the track",
+                    width="medium",
+                    options=Config.CATEGORIES,
+                    required=True,
+                ),
+                "Confidence": st.column_config.TextColumn(
+                    "Confidence",
+                    width="small",
+                    disabled=True
+                ),
+                "Track": st.column_config.TextColumn(
+                    "Track",
+                    width="large",
+                    disabled=True
+                ),
+                "Artist": st.column_config.TextColumn(
+                    "Artist",
+                    width="medium",
+                    disabled=True
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="classification_editor"
+        )
+        
+        # Check for changes and save
+        if not df.equals(edited_df):
+            # Find changed rows
+            changes = 0
+            for index, row in edited_df.iterrows():
+                original_row = df.iloc[index]
+                if row['Category'] != original_row['Category']:
+                    # Save change
+                    track_id = row['ID']
+                    new_category = row['Category']
+                    # Keep original confidence or set to 1.0 for manual override
+                    cache_manager.save_classification(track_id, new_category, 1.0)
+                    changes += 1
             
-            with st.expander(f"**{category}** ({len(tracks_in_cat)} tracks)", expanded=False):
-                for idx, track in enumerate(tracks_in_cat):
-                    col1, col2, col3 = st.columns([3, 2, 1])
-                    
-                    with col1:
-                        st.markdown(f"**{track['name']}**")
-                        st.caption(f"{', '.join(track['artists'][:2])}")
-                    
-                    with col2:
-                        new_category = st.selectbox(
-                            "Category",
-                            options=Config.CATEGORIES,
-                            index=Config.CATEGORIES.index(category) if category in Config.CATEGORIES else 0,
-                            key=f"cat_{track['id']}",
-                            label_visibility="collapsed"
-                        )
-                        
-                        if new_category != category:
-                            # Update classification
-                            confidence = track.get('classification_confidence', 0.8)
-                            cache_manager.save_classification(track['id'], new_category, confidence)
-                            st.success("✅ Updated!")
-                            st.rerun()
-                    
-                    with col3:
-                        confidence_pct = track.get('classification_confidence', 0) * 100
-                        st.metric("Confidence", f"{confidence_pct:.0f}%")
-        
+            if changes > 0:
+                st.toast(f"✅ Saved {changes} changes!", icon="💾")
+                # Update session state categorized tracks for next step
+                categorized = {}
+                for index, row in edited_df.iterrows():
+                    cat = row['Category']
+                    if cat not in categorized:
+                        categorized[cat] = []
+                    # Find original track object
+                    track_obj = next((t for t in tracks if t['id'] == row['ID']), None)
+                    if track_obj:
+                        categorized[cat].append(track_obj)
+                st.session_state.categorized_tracks = categorized
+
         # Approve button
         st.markdown("---")
         col1, col2 = st.columns([1, 1])
         
         with col1:
             if st.button("✅ Approve & Continue to Step 3", use_container_width=True, type="primary"):
+                # Re-build categorized dict from current DF state to be safe
+                final_categorized = {}
+                for index, row in edited_df.iterrows():
+                    cat = row['Category']
+                    if cat not in final_categorized:
+                        final_categorized[cat] = []
+                    track_obj = next((t for t in tracks if t['id'] == row['ID']), None)
+                    if track_obj:
+                        final_categorized[cat].append(track_obj)
+
                 # Save review file
                 review_file = ReviewManager.save_for_review(
-                    categorized, 
+                    final_categorized, 
                     "Liked Songs" if state.get("source") == "liked" else f"Playlist {state.get('playlist_id')}"
                 )
                 
@@ -504,8 +548,18 @@ def step_2_classify():
         
         with col2:
             if st.button("📥 Export to JSON", use_container_width=True):
+                # Re-build categorized dict
+                export_categorized = {}
+                for index, row in edited_df.iterrows():
+                    cat = row['Category']
+                    if cat not in export_categorized:
+                        export_categorized[cat] = []
+                    track_obj = next((t for t in tracks if t['id'] == row['ID']), None)
+                    if track_obj:
+                        export_categorized[cat].append(track_obj)
+
                 review_file = ReviewManager.save_for_review(
-                    categorized,
+                    export_categorized,
                     "Liked Songs" if state.get("source") == "liked" else f"Playlist {state.get('playlist_id')}"
                 )
                 st.success(f"✅ Exported to {review_file}")

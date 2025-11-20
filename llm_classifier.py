@@ -83,35 +83,48 @@ class LLMClassifier:
         return categorized_tracks
 
     def classify_batch(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
-        """Classify multiple songs with 8 parallel API calls."""
+        """Classify multiple songs with sequential API calls to avoid rate limits."""
         if not self.gemini_model or not tracks:
             return [self._fallback_classify(track) for track in tracks]
         
         try:
-            # Split tracks into 8 chunks for parallel processing
-            chunk_size = (len(tracks) + 7) // 8  # Ceiling division by 8
-            chunks = [tracks[i:i + chunk_size] for i in range(0, len(tracks), chunk_size)]
+            # Gemini 3 Pro has strict rate limits (RPM/RPD).
+            # We process sequentially with large batches to minimize request count.
+            # Max output tokens is 15k. ~50 tokens per song classification JSON = ~300 songs max.
+            # We'll use 200 to be safe.
+            batch_size = 200
             
-            # Process chunks in parallel using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = [executor.submit(self._classify_batch_internal, chunk) for chunk in chunks]
-                results_chunks = [future.result() for future in futures]
+            chunks = [tracks[i:i + batch_size] for i in range(0, len(tracks), batch_size)]
             
-            # Flatten results
             results = []
-            for chunk_results in results_chunks:
-                results.extend(chunk_results)
+            print(f"🔄 Processing {len(tracks)} tracks in {len(chunks)} batches (Sequential)...")
+            
+            for i, chunk in enumerate(chunks):
+                print(f"   Processing batch {i+1}/{len(chunks)} ({len(chunk)} tracks)...")
+                try:
+                    chunk_results = self._classify_batch_internal(chunk)
+                    results.extend(chunk_results)
+                except Exception as e:
+                    print(f"   ⚠️ Batch {i+1} failed, using fallback: {e}")
+                    results.extend([self._fallback_classify(t) for t in chunk])
+                
+                # Add delay between batches to respect rate limits
+                # Gemini 3 Pro Preview has strict rate limits
+                # We wait to ensure we don't hit RPM limits
+                if i < len(chunks) - 1:
+                    print("   ⏳ Waiting 30s to respect rate limits...")
+                    time.sleep(30)
             
             return results
         except Exception as e:
-            print(f"\n⚠️  Parallel classification failed: {e}")
+            print(f"\n⚠️  Classification failed: {e}")
             return [self._fallback_classify(track) for track in tracks]
     
     def _classify_batch_internal(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
         """Internal batch classification with retry logic."""
         prompt = self._build_batch_prompt(tracks)
         
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries):
             try:
                 response = self.gemini_model.generate_content(
@@ -141,9 +154,13 @@ class LLMClassifier:
                 
                 raise Exception("No valid response text found")
             except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(1.0 * (attempt + 1))
-                    continue
+                error_str = str(e).lower()
+                if "429" in error_str or "quota" in error_str:
+                    wait_time = 30 * (attempt + 1)
+                    print(f"   ⚠️  Rate limit hit. Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                elif attempt < max_retries - 1:
+                    time.sleep(2.0 * (attempt + 1))
                 else:
                     raise e
         
@@ -161,11 +178,30 @@ class LLMClassifier:
             else:
                 artists = ', '.join(artists_raw) if isinstance(artists_raw, list) else str(artists_raw)
             album = track.get('album', 'Unknown')
-            year = str(track.get('year', 'Unknown'))
+            release_date = track.get('release_date', '')
+            year = release_date[:4] if release_date else 'Unknown'
             
-            songs_text.append(f"{i}. \"{title}\" by {artists} (Album: {album}) [{year}]")
+            # New metadata
+            genres = ', '.join(track.get('genres', []))
+            audio_features = track.get('audio_features')
+            
+            features_str = ""
+            if audio_features:
+                valence = audio_features.get('valence')
+                energy = audio_features.get('energy')
+                danceability = audio_features.get('danceability')
+                tempo = audio_features.get('tempo')
+                features_str = f" | Valence: {valence} | Energy: {energy} | Dance: {danceability} | BPM: {tempo}"
+            
+            songs_text.append(f"{i}. \"{title}\" by {artists} (Album: {album}) [{year}]\n   Genres: {genres}{features_str}")
         
         return f"""You are an expert music classifier. Analyze each song carefully and classify into ONE category.
+
+**METADATA GUIDE:**
+- **Valence (0.0-1.0)**: Musical positiveness. High = Happy/Cheerful, Low = Sad/Depressed/Angry.
+- **Energy (0.0-1.0)**: Intensity. High = Fast/Loud/Noisy, Low = Slow/Quiet.
+- **Danceability (0.0-1.0)**: Suitability for dancing.
+- **Genres**: Artist genres from Spotify.
 
 **14 CATEGORIES:**
 

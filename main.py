@@ -299,7 +299,8 @@ def main():
             # Load all classifications from cache for summary
             categorized_tracks = {}
             for track in tracks:
-                category = cache_manager.get_classification(track['id']) or 'Misc'
+                cached_entry = cache_manager.get_classification(track['id'])
+                category = cached_entry.get('category') if cached_entry else 'Misc'
                 if category not in categorized_tracks:
                     categorized_tracks[category] = []
                 categorized_tracks[category].append(track)

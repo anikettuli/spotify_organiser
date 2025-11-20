@@ -15,8 +15,8 @@ class Config:
     SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:8888/callback')
     
     # Gemini API configuration
-    # Using Gemini 3.0 Pro Experimental as requested
-    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.0-pro-exp')
+    # Using Gemini 3 Pro Preview
+    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3-pro-preview')
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
     
     # Batch processing (100 songs per Gemini request)
@@ -24,7 +24,7 @@ class Config:
     
     # Classification settings
     CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.8'))
-    FETCH_ARTIST_GENRES = os.getenv('FETCH_ARTIST_GENRES', '0').lower() in ('1', 'true', 'yes')
+    FETCH_ARTIST_GENRES = os.getenv('FETCH_ARTIST_GENRES', '1').lower() in ('1', 'true', 'yes')
     
     # Cache file for token
     TOKEN_CACHE_PATH = '.spotify_token_cache'

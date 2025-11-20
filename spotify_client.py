@@ -163,6 +163,43 @@ class SpotifyClient:
                 missing = len(unique_artist_ids) - len(artist_genres_map)
                 print(f"   ⚠️  {missing} artists had no genre data available from Spotify")
 
+            # Fifth pass: fetch audio features in batches of 100
+            print(f"🎼 Fetching audio features for {len(tracks)} tracks...")
+            track_ids = [t['id'] for t in tracks if t.get('id')]
+            audio_features_map = {}
+            
+            for i in range(0, len(track_ids), 100):
+                batch = track_ids[i:i+100]
+                try:
+                    features_list = self.sp.audio_features(batch)
+                    for feature in features_list:
+                        if feature:
+                            audio_features_map[feature['id']] = feature
+                    
+                    print(f"   ✓ Processed features for {min(i+100, len(track_ids))}/{len(track_ids)} tracks")
+                    time.sleep(0.5) # Small delay to be nice
+                except Exception as e:
+                    print(f"   ⚠ Error fetching audio features {i}-{i+100}: {e}")
+                    if "429" in str(e):
+                        time.sleep(10)
+
+            # Enrich tracks with audio features
+            features_added = 0
+            for track in tracks:
+                if track['id'] in audio_features_map:
+                    af = audio_features_map[track['id']]
+                    track['audio_features'] = {
+                        'valence': af.get('valence'),
+                        'energy': af.get('energy'),
+                        'danceability': af.get('danceability'),
+                        'tempo': af.get('tempo')
+                    }
+                    features_added += 1
+                else:
+                    track['audio_features'] = None
+
+            print(f"   ✓ {features_added}/{len(tracks)} tracks now have audio features")
+
             return tracks
 
         # Mock/demo path: return a few synthetic tracks

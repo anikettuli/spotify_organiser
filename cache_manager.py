@@ -108,21 +108,18 @@ class CacheManager:
                     }
             self._save_cache(self.tracks_cache_file, self.tracks_cache)
     
-    def get_classification(self, track_id: str) -> Optional[str]:
+    def get_classification(self, track_id: str) -> Optional[Dict]:
         """
-        Get cached classification for a track (thread-safe read).
+        Get cached classification entry for a track (thread-safe read).
         
         Args:
             track_id: Spotify track ID
             
         Returns:
-            Category name or None if not cached
+            Classification dict (category, confidence, etc) or None if not cached
         """
         with self._classifications_lock:
-            entry = self.classifications_cache.get(track_id)
-            if entry:
-                return entry.get('category')
-            return None
+            return self.classifications_cache.get(track_id)
     
     def save_classification(self, track_id: str, category: str, confidence: float = 1.0):
         """
