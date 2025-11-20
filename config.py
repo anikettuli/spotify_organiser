@@ -15,8 +15,8 @@ class Config:
     SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:8888/callback')
     
     # Gemini API configuration
-    # Using Gemini 3 Pro Preview
-    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3-pro-preview')
+    # Using Gemini 2.5 Flash
+    GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
     
     # Batch processing (100 songs per Gemini request)

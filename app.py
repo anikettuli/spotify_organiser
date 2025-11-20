@@ -298,7 +298,7 @@ def step_1_fetch():
                         "Artist": ', '.join(t.get('artists', [])),
                         "Album": t.get('album', 'Unknown')
                     })
-                st.dataframe(preview_data, use_container_width=True, hide_index=True)
+                st.dataframe(preview_data, hide_index=True)
                 if len(tracks) > 10:
                     st.caption(f"Showing 10 of {len(tracks)} tracks")
         
@@ -478,7 +478,6 @@ def step_2_classify():
                 ),
             },
             hide_index=True,
-            use_container_width=True,
             key="classification_editor"
         )
         
@@ -592,7 +591,7 @@ def step_3_apply():
             "Tracks": data['count']
         })
     
-    st.dataframe(summary_data, use_container_width=True, hide_index=True)
+    st.dataframe(summary_data, hide_index=True)
     
     st.markdown("---")
     

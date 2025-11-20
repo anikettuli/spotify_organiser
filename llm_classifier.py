@@ -25,14 +25,31 @@ class LLMClassifier:
             try:
                 if Config.GOOGLE_API_KEY:
                     genai.configure(api_key=Config.GOOGLE_API_KEY)
-                    self.gemini_model = genai.GenerativeModel(
-                        Config.GEMINI_MODEL,
-                        generation_config={
-                            'temperature': 0.1,
-                            'response_mime_type': 'application/json',
-                        }
-                    )
-                    print(f"✅ Using {Config.GEMINI_MODEL} for classification")
+                    # Configure tools for grounding if available
+                    try:
+                        # Try enabling Google Search using protos to avoid ambiguity
+                        # We use the nested class genai.protos.Tool.GoogleSearch
+                        tool = genai.protos.Tool(google_search=genai.protos.Tool.GoogleSearch())
+                        
+                        self.gemini_model = genai.GenerativeModel(
+                            Config.GEMINI_MODEL,
+                            tools=[tool],
+                            generation_config={
+                                'temperature': 0.1,
+                                'response_mime_type': 'application/json',
+                            }
+                        )
+                        print(f"✅ Using {Config.GEMINI_MODEL} for classification (with Grounding enabled)")
+                    except Exception as e:
+                        print(f"⚠️  Failed to initialize Gemini with Grounding: {e}")
+                        print("   Falling back to standard classification without grounding.")
+                        self.gemini_model = genai.GenerativeModel(
+                            Config.GEMINI_MODEL,
+                            generation_config={
+                                'temperature': 0.1,
+                                'response_mime_type': 'application/json',
+                            }
+                        )
             except Exception as e:
                 print(f"⚠️  Failed to initialize Gemini: {e}")
                 self.gemini_model = None
@@ -83,39 +100,54 @@ class LLMClassifier:
         return categorized_tracks
 
     def classify_batch(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
-        """Classify multiple songs with sequential API calls to avoid rate limits."""
+        """Classify multiple songs with parallel API calls."""
         if not self.gemini_model or not tracks:
             return [self._fallback_classify(track) for track in tracks]
         
         try:
-            # Gemini 3 Pro has strict rate limits (RPM/RPD).
-            # We process sequentially with large batches to minimize request count.
-            # Max output tokens is 15k. ~50 tokens per song classification JSON = ~300 songs max.
-            # We'll use 200 to be safe.
-            batch_size = 200
-            
+            batch_size = Config.BATCH_SIZE
             chunks = [tracks[i:i + batch_size] for i in range(0, len(tracks), batch_size)]
             
-            results = []
-            print(f"🔄 Processing {len(tracks)} tracks in {len(chunks)} batches (Sequential)...")
+            results = [None] * len(chunks)
             
-            for i, chunk in enumerate(chunks):
-                print(f"   Processing batch {i+1}/{len(chunks)} ({len(chunk)} tracks)...")
-                try:
-                    chunk_results = self._classify_batch_internal(chunk)
-                    results.extend(chunk_results)
-                except Exception as e:
-                    print(f"   ⚠️ Batch {i+1} failed, using fallback: {e}")
-                    results.extend([self._fallback_classify(t) for t in chunk])
-                
-                # Add delay between batches to respect rate limits
-                # Gemini 3 Pro Preview has strict rate limits
-                # We wait to ensure we don't hit RPM limits
-                if i < len(chunks) - 1:
-                    print("   ⏳ Waiting 30s to respect rate limits...")
-                    time.sleep(30)
+            # Process in groups of 4 parallel calls
+            parallel_workers = 4
+            print(f"🔄 Processing {len(tracks)} tracks in {len(chunks)} batches ({parallel_workers} parallel calls)...")
             
-            return results
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                for i in range(0, len(chunks), parallel_workers):
+                    group_end = min(i + parallel_workers, len(chunks))
+                    group_indices = range(i, group_end)
+                    group_chunks = [chunks[j] for j in group_indices]
+                    
+                    print(f"   🚀 Launching batches {i+1}-{group_end}...")
+                    
+                    # Submit group
+                    futures = {executor.submit(self._classify_batch_internal, chunk): idx for idx, chunk in zip(group_indices, group_chunks)}
+                    
+                    # Collect results for this group
+                    for future in futures:
+                        idx = futures[future]
+                        try:
+                            results[idx] = future.result()
+                        except Exception as e:
+                            print(f"   ⚠️ Batch {idx+1} failed: {e}")
+                            results[idx] = [self._fallback_classify(t) for t in chunks[idx]]
+                    
+                    # Wait 2 seconds between groups to respect rate limits
+                    if group_end < len(chunks):
+                        print("   ⏳ Waiting 2s...")
+                        time.sleep(2)
+            
+            # Flatten results
+            final_results = []
+            for r in results:
+                if r:
+                    final_results.extend(r)
+                else:
+                    pass
+                    
+            return final_results
         except Exception as e:
             print(f"\n⚠️  Classification failed: {e}")
             return [self._fallback_classify(track) for track in tracks]
@@ -142,21 +174,31 @@ class LLMClassifier:
                 )
                 
                 # Safely get response text
-                if hasattr(response, 'text') and response.text:
-                    response_text = response.text.strip()
-                    return self._parse_batch_response(response_text, tracks)
-                elif hasattr(response, 'candidates') and response.candidates:
+                if hasattr(response, 'text'):
+                    try:
+                        response_text = response.text.strip()
+                        return self._parse_batch_response(response_text, tracks)
+                    except Exception:
+                        # If response.text fails, check candidates directly
+                        pass
+                
+                if hasattr(response, 'candidates') and response.candidates:
                     # Try to extract from candidates
                     candidate = response.candidates[0]
+                    # Check finish reason
+                    if candidate.finish_reason == 2: # MAX_TOKENS
+                        print(f"   ⚠️  Batch hit token limit (Finish Reason: MAX_TOKENS). Reducing batch size recommended.")
+                    
                     if hasattr(candidate.content, 'parts') and candidate.content.parts:
                         response_text = candidate.content.parts[0].text.strip()
                         return self._parse_batch_response(response_text, tracks)
                 
-                raise Exception("No valid response text found")
+                raise Exception(f"No valid response text found. Finish Reason: {response.candidates[0].finish_reason if response.candidates else 'Unknown'}")
             except Exception as e:
                 error_str = str(e).lower()
                 if "429" in error_str or "quota" in error_str:
-                    wait_time = 30 * (attempt + 1)
+                    # Exponential backoff with a higher base for 3 Pro
+                    wait_time = 45 * (attempt + 1)
                     print(f"   ⚠️  Rate limit hit. Waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
                 elif attempt < max_retries - 1:
