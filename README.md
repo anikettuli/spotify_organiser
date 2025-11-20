@@ -8,9 +8,11 @@ This application uses Google's Gemini 3 Pro model to intelligently classify your
 
 *   **AI-Powered Classification**: Uses Gemini 3 Pro to analyze artist, title, and metadata to determine the best category.
 *   **Smart Categories**: Pre-defined categories including "Punjabi - Hype", "Hindi - Bollywood", "English - Pop", "Gym - Phonk", "Sad/Emotional", and more.
+*   **Web GUI**: Clean, minimal Streamlit interface with progress tracking and visual controls.
 *   **3-Step Workflow**: Fetch, Classify, and Apply steps are separated to give you control.
 *   **Caching System**: Caches track metadata and classification results locally to minimize API usage and speed up subsequent runs.
-*   **Manual Review**: Generates a JSON review file allowing you to verify and tweak classifications before any changes are made to your Spotify account.
+*   **Edit Classifications**: Review and modify classifications directly in the GUI before applying.
+*   **Progress Persistence**: App remembers your progress across sessions.
 *   **Batch Processing**: Processes songs in parallel batches for speed.
 
 ## 🚀 Getting Started
@@ -51,12 +53,31 @@ This application uses Google's Gemini 3 Pro model to intelligently classify your
     USE_MOCKS=False
     ```
 
-## 📖 Usage Workflow
+## 📖 Usage
 
-The app follows a safe 3-step process:
+### Web GUI (Recommended)
+Launch the Streamlit web interface:
+```bash
+streamlit run app.py
+```
 
-### Step 1: Fetch Tracks
-Downloads your songs from Spotify and caches them locally.
+The GUI provides:
+*   **Step 1: Fetch** - Download tracks from Spotify (Liked Songs or Playlist)
+*   **Step 2: Classify** - AI classification with real-time progress
+*   **Step 3: Apply** - Create/update playlists in your Spotify account
+
+**Features:**
+*   Progress tracking across sessions
+*   Edit classifications with dropdowns
+*   Visual confidence scores
+*   Category breakdowns
+*   One-click approval
+
+### CLI (Alternative)
+
+The app also supports a command-line workflow:
+
+#### Step 1: Fetch Tracks
 ```bash
 # Fetch Liked Songs
 python main.py --fetch
@@ -65,16 +86,12 @@ python main.py --fetch
 python main.py --fetch --source playlist --playlist-id <playlist_id>
 ```
 
-### Step 2: Classify
-Sends track data to Gemini for classification. This step uses the local cache for tracks, so it doesn't need to re-download from Spotify.
+#### Step 2: Classify
 ```bash
 python main.py --classify
 ```
-*   This generates a review file at `.review/classification_review.json`.
-*   **Review Process**: Open this file, check the categorizations. If you are satisfied, change `"approved": false` to `"approved": true` at the top of the file. You can also manually move tracks between categories in this file.
 
-### Step 3: Apply
-Reads the approved review file and creates/updates the playlists in your Spotify account.
+#### Step 3: Apply
 ```bash
 python main.py --apply
 ```
