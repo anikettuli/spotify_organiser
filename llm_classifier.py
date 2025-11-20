@@ -2,15 +2,17 @@
 import re
 import time
 import json
-import asyncio
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from config import Config
+
+genai: Any
 
 try:
     import google.generativeai as genai
     _HAS_GOOGLE = True
 except ImportError:
+    genai = None  # type: ignore[assignment]
     _HAS_GOOGLE = False
 
 
@@ -19,7 +21,7 @@ class LLMClassifier:
 
     def __init__(self):
         """Initialize Gemini API."""
-        self.gemini_model = None
+        self.gemini_model: Optional[Any] = None
         
         if _HAS_GOOGLE and not Config.USE_MOCKS:
             try:
@@ -100,18 +102,22 @@ class LLMClassifier:
         return categorized_tracks
 
     def classify_batch(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
-        """Classify multiple songs with parallel API calls."""
+        """Classify multiple songs with parallel API calls (optimized for 3-Pro limits)."""
         if not self.gemini_model or not tracks:
             return [self._fallback_classify(track) for track in tracks]
         
         try:
+            # Gemini 3 Pro Preview Limits:
+            # RPM: 2,000
+            # Output Tokens: 65k
+            # We can be aggressive.
             batch_size = Config.BATCH_SIZE
             chunks = [tracks[i:i + batch_size] for i in range(0, len(tracks), batch_size)]
             
-            results = [None] * len(chunks)
-            
-            # Process in groups of 4 parallel calls
-            parallel_workers = 4
+            results: List[Optional[List[Tuple[str, float]]]] = [None] * len(chunks)
+
+            # Number of parallel Gemini requests (configurable via Config.PARALLEL_WORKERS)
+            parallel_workers = Config.PARALLEL_WORKERS
             print(f"🔄 Processing {len(tracks)} tracks in {len(chunks)} batches ({parallel_workers} parallel calls)...")
             
             with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
@@ -134,10 +140,9 @@ class LLMClassifier:
                             print(f"   ⚠️ Batch {idx+1} failed: {e}")
                             results[idx] = [self._fallback_classify(t) for t in chunks[idx]]
                     
-                    # Wait 2 seconds between groups to respect rate limits
+                    # Minimal wait (1s) just to be polite, even with high limits
                     if group_end < len(chunks):
-                        print("   ⏳ Waiting 2s...")
-                        time.sleep(2)
+                        time.sleep(1)
             
             # Flatten results
             final_results = []
@@ -154,6 +159,9 @@ class LLMClassifier:
     
     def _classify_batch_internal(self, tracks: List[Dict]) -> List[Tuple[str, float]]:
         """Internal batch classification with retry logic."""
+        if not self.gemini_model:
+            raise RuntimeError("Gemini model not initialized")
+
         prompt = self._build_batch_prompt(tracks)
         
         max_retries = 3
@@ -187,7 +195,7 @@ class LLMClassifier:
                     candidate = response.candidates[0]
                     # Check finish reason
                     if candidate.finish_reason == 2: # MAX_TOKENS
-                        print(f"   ⚠️  Batch hit token limit (Finish Reason: MAX_TOKENS). Reducing batch size recommended.")
+                        print("   ⚠️  Batch hit token limit (Finish Reason: MAX_TOKENS). Reducing batch size recommended.")
                     
                     if hasattr(candidate.content, 'parts') and candidate.content.parts:
                         response_text = candidate.content.parts[0].text.strip()
@@ -225,25 +233,24 @@ class LLMClassifier:
             
             # New metadata
             genres = ', '.join(track.get('genres', []))
-            audio_features = track.get('audio_features')
             
-            features_str = ""
-            if audio_features:
-                valence = audio_features.get('valence')
-                energy = audio_features.get('energy')
-                danceability = audio_features.get('danceability')
-                tempo = audio_features.get('tempo')
-                features_str = f" | Valence: {valence} | Energy: {energy} | Dance: {danceability} | BPM: {tempo}"
+            # Track details
+            popularity = track.get('popularity', 0)
+            explicit = "Explicit" if track.get('explicit') else "Clean"
+            duration_ms = track.get('duration_ms', 0)
+            duration_min = f"{duration_ms / 60000:.1f}m"
             
-            songs_text.append(f"{i}. \"{title}\" by {artists} (Album: {album}) [{year}]\n   Genres: {genres}{features_str}")
+            songs_text.append(f"{i}. \"{title}\" by {artists} (Album: {album}) [{year}]\n   "
+                              f"Info: {popularity}% pop, {explicit}, {duration_min}\n   "
+                              f"Genres: {genres}")
         
         return f"""You are an expert music classifier. Analyze each song carefully and classify into ONE category.
 
 **METADATA GUIDE:**
-- **Valence (0.0-1.0)**: Musical positiveness. High = Happy/Cheerful, Low = Sad/Depressed/Angry.
-- **Energy (0.0-1.0)**: Intensity. High = Fast/Loud/Noisy, Low = Slow/Quiet.
-- **Danceability (0.0-1.0)**: Suitability for dancing.
-- **Genres**: Artist genres from Spotify.
+- **Popularity (0-100)**: >80 is Mainstream/Top 40. <30 is Niche/Indie.
+- **Explicit**: Contains curse words (often Hip-Hop/Rap).
+- **Duration**: <2m (Interlude/Viral), >6m (Prog/Classical).
+- **Genres**: Artist genres from Spotify (primary classification signal).
 
 **14 CATEGORIES:**
 

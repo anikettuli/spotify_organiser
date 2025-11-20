@@ -37,7 +37,7 @@ class SpotifyClient:
                 client_id=Config.SPOTIFY_CLIENT_ID,
                 client_secret=Config.SPOTIFY_CLIENT_SECRET,
                 redirect_uri=Config.SPOTIFY_REDIRECT_URI,
-                scope="user-library-read playlist-read-private playlist-modify-public playlist-modify-private",
+                scope="user-library-read playlist-read-private playlist-modify-public playlist-modify-private user-read-playback-state",
                 cache_path=Config.TOKEN_CACHE_PATH,
                 open_browser=True  # Open browser for OAuth flow
             )
@@ -163,42 +163,10 @@ class SpotifyClient:
                 missing = len(unique_artist_ids) - len(artist_genres_map)
                 print(f"   ⚠️  {missing} artists had no genre data available from Spotify")
 
-            # Fifth pass: fetch audio features in batches of 100
-            print(f"🎼 Fetching audio features for {len(tracks)} tracks...")
-            track_ids = [t['id'] for t in tracks if t.get('id')]
-            audio_features_map = {}
-            
-            for i in range(0, len(track_ids), 100):
-                batch = track_ids[i:i+100]
-                try:
-                    features_list = self.sp.audio_features(batch)
-                    for feature in features_list:
-                        if feature:
-                            audio_features_map[feature['id']] = feature
-                    
-                    print(f"   ✓ Processed features for {min(i+100, len(track_ids))}/{len(track_ids)} tracks")
-                    time.sleep(0.5) # Small delay to be nice
-                except Exception as e:
-                    print(f"   ⚠ Error fetching audio features {i}-{i+100}: {e}")
-                    if "429" in str(e):
-                        time.sleep(10)
-
-            # Enrich tracks with audio features
-            features_added = 0
+            # Skip audio features in development mode (403 errors due to extended quota requirement)
+            print(f"⚠️  Skipping audio features (requires Spotify Extended Quota Mode)")
             for track in tracks:
-                if track['id'] in audio_features_map:
-                    af = audio_features_map[track['id']]
-                    track['audio_features'] = {
-                        'valence': af.get('valence'),
-                        'energy': af.get('energy'),
-                        'danceability': af.get('danceability'),
-                        'tempo': af.get('tempo')
-                    }
-                    features_added += 1
-                else:
-                    track['audio_features'] = None
-
-            print(f"   ✓ {features_added}/{len(tracks)} tracks now have audio features")
+                track['audio_features'] = None
 
             return tracks
 
@@ -306,6 +274,9 @@ class SpotifyClient:
                 'release_date': track.get('release_date', '') or track.get('album', {}).get('release_date', ''),
                 'genres': [],  # Empty - LLM will classify based on track/artist name instead
                 'markets': track.get('markets', []) or track.get('album', {}).get('available_markets', []),
+                'popularity': track.get('popularity', 0),
+                'explicit': track.get('explicit', False),
+                'duration_ms': track.get('duration_ms', 0),
                 'uri': track.get('uri')
             }
         except Exception:
@@ -319,6 +290,9 @@ class SpotifyClient:
                 'release_date': track.get('release_date', ''),
                 'genres': track.get('genres', []),
                 'markets': track.get('markets', []),
+                'popularity': 0,
+                'explicit': False,
+                'duration_ms': 0,
                 'uri': track.get('uri', '')
             }
     

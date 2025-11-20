@@ -19,11 +19,14 @@ class Config:
     GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
     
-    # Batch processing (100 songs per Gemini request)
+    # Batch processing (songs per Gemini request)
     BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
-    
+
+    # Parallel workers (number of concurrent Gemini requests)
+    PARALLEL_WORKERS = int(os.getenv('PARALLEL_WORKERS', '8'))
+
     # Classification settings
-    CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.8'))
+    CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.85'))
     FETCH_ARTIST_GENRES = os.getenv('FETCH_ARTIST_GENRES', '1').lower() in ('1', 'true', 'yes')
     
     # Cache file for token
